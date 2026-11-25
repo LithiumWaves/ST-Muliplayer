@@ -180,15 +180,16 @@ async function stmpGenerateInterceptor(chat, _contextSize, abort, type) {
         // which is `/send {{input}} | /setinput` and never generates — never gets
         // here. ChatBridge already forwarded the text on MESSAGE_SENT; this asks
         // for the reply that the text alone must not imply.
+        let sent = false;
         try {
-            session.chat.requestGenerationFromHost(type);
+            sent = session.chat.requestGenerationFromHost(type) !== false;
         } catch (error) {
             console.error('[Multiplayer] Could not ask the host for a reply', error);
         }
         // Abort so the client does not also hit its own API with a half-synced
         // context.
         abort(true);
-        globalThis.toastr?.info('Sent to the host — their model will answer for the room.', 'Multiplayer');
+        if (sent) globalThis.toastr?.info('Sent to the host — their model will answer for the room.', 'Multiplayer');
         return;
     }
     abort(true);
@@ -328,6 +329,14 @@ function registerSlashCommands(deps) {
         return '';
     }, 'Sends a message to the player-only chat, or opens the panel when given no text.', [
         SlashCommandArgument.fromProps({ description: 'message', typeList: [ARGUMENT_TYPE.STRING], isRequired: false }),
+    ]);
+
+    register('mp-ask', async (_named, text) => {
+        const name = String(text ?? '').trim();
+        if (!name) return 'name a group member';
+        return session.askGroupMember(name);
+    }, 'In a shared group chat, asks one character to reply next (by name). Works for the host and for players.', [
+        SlashCommandArgument.fromProps({ description: 'character name', typeList: [ARGUMENT_TYPE.STRING], isRequired: true }),
     ]);
 
     register('mp-storage', () => JSON.stringify(session?.storage.audit() ?? {}), 'Read-only shared storage report. Does not delete cards or chats.');

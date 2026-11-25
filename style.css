@@ -1043,3 +1043,18 @@
     margin: 2px 0 0 4px;
     font-size: 0.9em;
 }
+
+/* Group chat session */
+#stmp_settings .stmp-group-session {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin: 6px 0;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: rgba(127, 127, 127, 0.1);
+    overflow-wrap: anywhere;
+}
+#stmp_settings .stmp-group-session .menu_button {
+    align-self: flex-start;
+}

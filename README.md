@@ -3,10 +3,33 @@
 One host, one shared roleplay, and a separate persona for each player. The host
 runs the model; joining players do not need their own inference API keys.
 
-**Version 1.4.0: persistent sharing and reconnect reliability.** Both the browser
-extension and the host relay must be updated together. The wire revision is
-`STMP/1.4.0`; older peers are deliberately rejected rather than mixed into the
-same room.
+**Version 1.5.0: internet play without a VPN, phone hosting, and group chats.**
+Both the browser extension and the host relay must be updated together. The wire
+revision is `STMP/1.5.0`; older peers are deliberately rejected rather than mixed
+into the same room.
+
+## What changed in 1.5.0
+
+- **No VPN needed.** Play over the internet through your own router: automatic
+  NAT-PMP/UPnP mapping, or one manual port forward. No Radmin, Tailscale, tunnel
+  or account is involved. See
+  [Play over the internet without a VPN](#play-over-the-internet-without-a-vpn).
+- **Hosting from Android (Termux).** Address and router discovery no longer
+  depend on Android's blocked interface list. A **Router address** field covers
+  routers that cannot be found automatically.
+- **Safer when the port is public.** A room-wide breaker stops guessing spread
+  across many addresses. **Lock room** shuts the door once everyone is in, while
+  a player whose phone slept can still reconnect. The router port closes by
+  itself after 30 minutes with nobody but the host.
+- **Mobile reconnects.** When the SillyTavern tab comes back to the foreground or
+  the phone comes back online, it reconnects at once.
+- **IPv6.** The relay listens dual-stack and connection codes can carry an IPv6
+  address, which often needs no forwarding at all.
+- **SillyTavern group chats.** The host opens a group whose members are all shared.
+  Every player gets the same group, with each message under the right character's
+  name and portrait. `/mp-ask Name` asks a particular member to answer.
+
+## What changed in 1.4.0
 
 The manifest minimum remains SillyTavern 1.13.0. The character and persona API
 contracts were reviewed against upstream source, and the automated tests below
@@ -18,7 +41,7 @@ been removed.
 
 ## What changed in 1.4.0
 
-The old relay reused `welcome` for host-name updates. A browser answered that
+The 1.4.0 relay stopped reusing `welcome` for host-name updates. A browser answered that
 message with another roster/name announcement, producing a feedback loop.
 Repeated reconnects also left old connection IDs in the persona map. This
 release separates initial admission from `welcome.update`, makes admission
@@ -143,6 +166,16 @@ generation. A normal client send can request a reply when the host enables
 posts a turn without requesting generation, so several players can act first.
 Typing indicators and the generation-status banner show what is happening.
 
+**Group chats.** To play a SillyTavern group, the host shares every member and
+opens the group chat. If a member is not shared yet, the panel lists it and
+offers **Share group members**. Players see the group in the Multiplayer panel,
+and **Open group chat** creates or reuses a local copy built from their saved
+copies of those characters. Only one such copy exists per host group. It is
+reused across reconnects and new codes, and updated in place when the host adds,
+removes or mutes a member. The host's model and the group's own activation
+strategy decide who speaks. `/mp-ask Name` asks one member to answer next,
+for the host and for players.
+
 **Player chat.** The speech-bubble button opens the separate out-of-character
 panel. Its messages do not enter the model's chat array or prompt through this
 extension. **To RP** explicitly posts a composed message into the roleplay. The
@@ -257,6 +290,55 @@ the local persona and asks for the shared catalogue again. It does not erase
 identity receipts. `/mp-storage` produces a read-only JSON report; `/mp-resync`
 performs the same resynchronization as the button.
 
+## Play over the internet without a VPN
+
+The joining player connects straight to the host's relay. Nothing in between
+needs an account, a VPN or a tunnel. All that is needed is a way through the
+host's router.
+
+**Who should host.** Host on home Wi-Fi or broadband. Mobile networks put phones
+behind carrier-grade NAT, which no port forward can get through. The joining
+player can be anywhere, including on mobile data.
+
+1. Keep **Allow players on my local network** and **Ask my router to open the
+   port automatically** ticked, then press **Start hosting**.
+2. Look at the **Internet play** box under the connection code.
+   - **Ready**: the router opened the port and supplied your public address.
+     Send the code and you are done.
+   - **Not reachable from outside yet**: if you host from a phone, type the
+     router's address in **Router address** (usually `192.168.1.1` or
+     `192.168.0.1`; on Android see Settings → Wi-Fi → your network → Gateway)
+     and start hosting again.
+   - If the router still refuses, forward **TCP** on the port (default `8899`)
+     yourself, to the local address the box shows. Give that device a DHCP
+     reservation so the rule keeps working. Then put your public IP, or your
+     router's DDNS hostname, in **Address players connect to** and press
+     **New code**.
+   - **Carrier-grade NAT**: the connection itself cannot accept incoming
+     connections. Host from another network, ask the ISP for a public IPv4
+     address, or try IPv6 (below).
+3. Send the code privately. Once everyone has joined, press **Lock room**.
+
+**IPv6.** Where the host has a global IPv6 address, the box offers **Use IPv6**.
+IPv6 has no NAT, so all that is needed is to allow the port in the router's
+IPv6 firewall. The joining player's network must have IPv6 too.
+
+**Android/Termux hosts.** Run `termux-wake-lock`, exempt Termux from battery
+optimisation, and keep the SillyTavern tab open. Android stops background work
+aggressively. A player's phone that sleeps mid-session reconnects by itself when
+the tab is opened again.
+
+**What protects an open port.** Only someone holding the code can complete the
+handshake. The code carries a random 128-bit room key, and the key itself never
+crosses the network. Traffic is encrypted with AES-256-GCM. Wrong guesses
+block the guessing address. Many failures from any mix of addresses refuse
+everyone new for two minutes, except the host's own browser. **Lock room**
+refuses newcomers even with a correct code. **New code** invalidates the old one
+and its rejoin tickets. Automatic router mappings are leased, renewed only while
+hosting, and released when you stop or after 30 idle minutes (**Reopen port**
+brings it back). A manual forward stays open until you remove it, so remove it,
+or stop SillyTavern, when you are done playing.
+
 ## Connectivity and troubleshooting
 
 The default relay port is `8899`. The address embedded in the code must be
@@ -279,6 +361,10 @@ application-level encryption does not bypass browser mixed-content rules.
 | `kind is not defined` | Replace the old browser files and reload; the failing warning path is fixed in 1.4.0. |
 | Constant join/leave or rapidly growing persona list | Update **both** relay and clients, restart the host server, and close stale tabs. The welcome echo loop and stale persona entries are fixed. Other network faults can still disconnect a peer. |
 | Protocol mismatch | Reinstall the relay from the updated extension folder, restart the server, and reload all peers. |
+| "The host has locked this room" | The host pressed **Lock room** before you joined. Ask them to unlock it. |
+| Code works at home, not from outside | Check **Internet play** on the host. "Carrier-grade NAT" means the host network cannot accept incoming connections. Otherwise forward the port or fill in **Router address**. |
+| Port mapping stopped working after a while | The relay closes an idle router port after 30 minutes. Press **Reopen port**. |
+| Group chat shows "Receiving characters…" | The players' copies of some members have not arrived yet. Wait, or use **Resync shared data**. |
 | Plugin HTTP 404 | Confirm the relay is installed, server plugins are enabled, startup did not report an import/dependency error, and the server was restarted. |
 | Plugin HTTP 401/403 | Check the signed-in session and host account's admin permission. |
 | Connection attempts never reach the host | Verify the advertised address/port, firewall, binding, private-network access, and tunnel settings. |
@@ -303,6 +389,7 @@ large catalogues and images can still take time to synchronize.
 | `/mp-sync` | Review extension parity and synchronization. |
 | `/mp-status` | Report session status. |
 | `/mp-ooc [message]` | Open player chat, or send a player-chat message. |
+| `/mp-ask <name>` | In a shared group chat, ask that character to reply next. |
 | `/mp-storage` | Return the read-only shared-storage report. |
 | `/mp-resync` | Republish/request shared data without clearing receipts. |
 
@@ -340,7 +427,7 @@ npm run test:hunt
 ```
 
 `npm test` runs each suite in a fresh process and fails if any suite fails or
-exceeds its timeout. The recorded 1.4.0 run passed **336 checks across 14 suites**.
+exceeds its timeout. The recorded 1.5.0 run passed **386 checks across 17 suites**.
 It includes the real relay, real transport and crypto, and storage-adapter tests
 covering 100 simultaneous deliveries, 100 repeated unchanged synchronizations,
 10 join/leave cycles plus an automatic retry, changed revisions, failed writes,
@@ -383,6 +470,7 @@ lib/
   parity.js              extension comparison and reviewed sync plans
   lore.js                session World Info integration
   ooc.js                 separate player-chat channel and panel
+  groups.js              group-chat sessions and durable client mirror groups
   typing.js              typing state
   ui.js                  settings UI, cloud-card gating, recovery dialog
 mp-personas.js           optional legacy persona import helper, not live entrypoint
@@ -401,7 +489,16 @@ TEST_REPORT.md           recorded validation and remaining manual checks
 ## Limits
 
 The host remains a single point of failure; there is no host migration. One
-character is active at a time, and group-chat synchronization is not implemented.
+character or one group is active at a time. In a group session, the members must
+all be shared. Group settings other than name, members and muted members
+(activation strategy, avatar, auto-mode) stay host-side. If SillyTavern loses
+the response to a group-create request, a second mirror group can appear. The
+create endpoint does not keep the marker that recovery relies on.
+The handshake breaker exempts loopback connections. A tunnel or reverse proxy on
+the host machine makes every player look local, so rely on its own rate limits.
+Port mapping has been exercised only against protocol tests here, not real
+routers. Some routers ship with UPnP disabled, and carrier-grade NAT cannot be
+worked around.
 Client transcripts mirror the host; branching, editing, and swipes are host-side
 actions. Saved chats and session lore are separate from the character-stub cache.
 The peer limit is eight, and a received catalogue is limited to 512 cards.

@@ -1,3 +1,70 @@
+# Multiplayer 1.5.0 - validation addendum
+
+Date: 2026-11-25
+Output: browser extension and relay version 1.5.0, wire revision `STMP/1.5.0`
+
+## Result
+
+**386 checks passed across all 17 main regression suites** (`npm test`). The hunt
+suite reported **13 passes and zero findings**. The Chromium UI smoke page
+(`tests/ui-smoke.html`, Playwright/Chromium) completed **59 assertions**.
+Environment: Linux container, Node 22, real `ws` from `npm install`.
+
+New suites:
+
+- `tests/internet.test.mjs` (19 checks). These cover:
+  - room lock refusing a newcomer who has the right code;
+  - rejoin-ticket readmission after a dropped socket, and refusal of forged tickets;
+  - the host always readmitted;
+  - tickets cleared on rotation;
+  - the room-wide handshake breaker, with loopback exempt;
+  - idle release and reopening of the router mapping;
+  - IPv6 connection-code round trips, classification and input cleaning;
+  - dual-stack listening;
+  - Android fallbacks: a throwing interface list, common gateways, a typed
+    router address that must be private, direct UPnP description probing, and
+    finding the local address without listing interfaces.
+- `tests/groups.test.mjs` (22 checks). These cover:
+  - stable host group identities;
+  - describing a group by card ids, with unshared members named;
+  - group revisions;
+  - exactly one mirror group across 100 repeated and concurrent ensures;
+  - marker recovery, in-place update, recreation after deletion, and failed creates;
+  - host session announcements, including during member generation;
+  - a group with unshared members not becoming a session;
+  - membership edits re-announced without resetting the transcript;
+  - client mirroring across 10 reconnects, and waiting for every member;
+  - bounding of a hostile group payload;
+  - per-speaker portraits in snapshots, appends and the live placeholder;
+  - one reply request per player turn;
+  - `/mp-ask` routing and `/trigger` sanitising.
+
+### Not tested here
+
+There was no real router, ISP, IPv6 network, Android device or Termux install.
+Port mapping was checked at the protocol and fallback level only. The group
+endpoints (`/api/groups/create`, `/api/groups/edit`) and `openGroupChat` were
+mocked from their upstream contracts, not run inside SillyTavern.
+
+### Manual acceptance for 1.5.0
+
+1. Host on Termux on home Wi-Fi, with **Router address** filled in if needed.
+   Join from a second phone on mobile data, chat, then background the joiner's
+   browser for a few minutes and return to it. It should reconnect without
+   pressing Join.
+2. Press **Lock room**. A third device using the code should be refused, and the
+   second phone should still reconnect after its browser is backgrounded.
+3. Forward the port manually with automatic mapping off, and repeat step 1 using
+   the public IP in **Address players connect to**.
+4. On the host, open a group of three shared characters and play a few rounds.
+   On the phone, confirm each reply carries the right name and portrait, the
+   live placeholder names the speaker, and `/mp-ask Name` makes that character
+   answer. Add a member on the host and confirm the phone's group updates
+   without a second group appearing. Leave and rejoin and confirm the group
+   count stays at one.
+
+---
+
 # Multiplayer 1.4.0 - validation report
 
 Date: 2026-09-19

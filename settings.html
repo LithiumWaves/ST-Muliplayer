@@ -163,6 +163,7 @@
             <div class="stmp-section">
                 <div class="stmp-section-title"><i class="fa-solid fa-masks-theater"></i> Shared session</div>
                 <div id="stmp_session_state" class="stmp-session-state"></div>
+                <div id="stmp_group_session" class="stmp-group-session" hidden></div>
                 <label class="checkbox_label" for="stmp_auto_reply">
                     <input id="stmp_auto_reply" type="checkbox">
                     <span>Answer when a player asks for a reply
@@ -173,8 +174,10 @@
                 </label>
 
                 <div class="stmp-muted stmp-note">
-                    Only the chat of the character below is shared. Messages in any other chat stay
-                    local to you, and nothing from the room can appear in them.
+                    Only the chat of the character below, or the group chat the host opens, is shared.
+                    Messages in any other chat stay local to you, and nothing from the room can appear in them.
+                    To play a group, the host opens a SillyTavern group chat whose members are all shared;
+                    players then get the same group in their character list.
                 </div>
                 <ul id="stmp_session_cards" class="stmp-session-cards"></ul>
 
