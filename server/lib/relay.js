@@ -24,7 +24,9 @@ import {
     STAMP_IDENTITY, HS, LIMITS, OP, PROTOCOL_REVISION, REJECT_REASON, ROLE,
     PSK_LENGTH, HANDSHAKE_NONCE_LENGTH, ROOM_ID_LENGTH, TO_HOST_ONLY,
 } from './protocol.js';
-import { PortMapper, isPrivateIPv4 } from './portmap.js';
+import {
+    PortMapper, detectLanAddress, isPrivateIPv4, normaliseGateway, safeNetworkInterfaces,
+} from './portmap.js';
 import {
     ReplayWindow, TokenBucket, computeConfirmation, confirmationLabels,
     createEphemeralKeyPair, deriveRoomId, deriveSessionKeys, openFrame,
@@ -54,12 +56,41 @@ function isLoopback(address) {
     return LOOPBACK.has(String(address ?? ''));
 }
 
-/** Non-internal IPv4 addresses, so the host can tell people where to point. */
-export function localAddresses() {
+/**
+ * Non-internal IPv4 addresses, so the host can tell people where to point.
+ * Empty, never throwing, on Android, where Termux may not list interfaces.
+ */
+export function localAddresses(osModule = os) {
     const found = [];
-    for (const entries of Object.values(os.networkInterfaces())) {
+    for (const entries of Object.values(safeNetworkInterfaces(osModule))) {
         for (const entry of entries ?? []) {
-            if (entry.family === 'IPv4' && !entry.internal) found.push(entry.address);
+            if ((entry.family === 'IPv4' || entry.family === 4) && !entry.internal) found.push(entry.address);
+        }
+    }
+    return found;
+}
+
+/** True for a globally routable unicast IPv6 address (2000::/3). */
+export function isGlobalIPv6(address) {
+    const value = String(address ?? '').toLowerCase().split('%')[0];
+    if (!value.includes(':')) return false;
+    const first = parseInt(value.split(':')[0] || '0', 16);
+    return Number.isFinite(first) && (first & 0xe000) === 0x2000;
+}
+
+/**
+ * Global IPv6 addresses. With IPv6 there is no NAT: when one is listed, players
+ * can often reach the host by opening the port in the router's IPv6 firewall,
+ * with no forwarding at all. Temporary (privacy) addresses are listed too; the
+ * stable one tends to come first.
+ */
+export function globalIPv6Addresses(osModule = os) {
+    const found = [];
+    for (const entries of Object.values(safeNetworkInterfaces(osModule))) {
+        for (const entry of entries ?? []) {
+            if ((entry.family === 'IPv6' || entry.family === 6) && !entry.internal && isGlobalIPv6(entry.address)) {
+                found.push(entry.address);
+            }
         }
     }
     return found;
@@ -167,6 +198,31 @@ export class Relay {
         /** Manually blocked addresses. */
         this.bans = new Set();
 
+        /**
+         * Timestamps of recent failed handshakes from *any* address. Per-IP
+         * blocking does nothing against guesses spread over many addresses, so
+         * past a room-wide threshold new connections are refused for a while.
+         * @type {number[]}
+         */
+        this.recentFailures = [];
+        this.breakerUntil = 0;
+
+        /**
+         * A locked room refuses newcomers, even ones holding the code. Peers who
+         * were already admitted carry a rejoin ticket, so a phone that dropped
+         * the connection when it went to sleep can still come back.
+         */
+        this.locked = false;
+        /** @type {Set<string>} */
+        this.tickets = new Set();
+
+        /** Router address typed by the host; needed on Android, where it cannot be derived. */
+        this.routerAddress = null;
+        /** LAN address, detected without listing interfaces when that is not allowed. */
+        this.lanAddress = null;
+        /** When the room last had no players besides the host (for releasing the router mapping). */
+        this.emptySince = 0;
+
         this.startedAt = 0;
         this._sweeper = null;
     }
@@ -186,10 +242,15 @@ export class Relay {
         this.maxPeers = clampInt(options.maxPeers, 2, LIMITS.MAX_PEERS, 4);
         this.requireParity = options.requireParity !== false;
         this.parityStrictness = options.parityStrictness === 'commit' ? 'commit' : 'manifest';
+        this.routerAddress = normaliseGateway(options.routerAddress);
+        this.autoMap = options.autoMap !== false;
+        this.locked = false;
+        this.tickets.clear();
+        this.recentFailures = [];
+        this.breakerUntil = 0;
+        this.emptySince = Date.now();
 
         this.#regenerateSecrets();
-
-        const host = this.bindLan ? '0.0.0.0' : '127.0.0.1';
 
         this.httpServer = http.createServer((request, response) => {
             // Nothing here is a web server. Say so and close.
@@ -212,6 +273,12 @@ export class Relay {
                 socket.destroy();
                 return;
             }
+            // The host's own browser always gets through, so a flood of bad
+            // guesses cannot lock the host out of their own room.
+            if (this.breakerUntil > Date.now() && !isLoopback(ip)) {
+                socket.destroy();
+                return;
+            }
             if (this.pending.size >= LIMITS.MAX_PENDING) {
                 this.log('warn', `Refusing ${ip}: too many half-open connections`);
                 socket.destroy();
@@ -220,12 +287,13 @@ export class Relay {
             this.wss.handleUpgrade(request, socket, head, ws => this.#onConnection(ws, ip));
         });
 
-        await new Promise((resolve, reject) => {
+        // Dual-stack when listening beyond loopback, so IPv6 players (no NAT,
+        // so often no port forward needed) can connect too. Falls back to IPv4
+        // on systems without IPv6.
+        const listen = address => new Promise((resolve, reject) => {
             const onError = error => {
                 this.httpServer?.off('listening', onListening);
-                reject(error.code === 'EADDRINUSE'
-                    ? new Error(`Port ${this.port} is already in use. Pick a different port in the Multiplayer settings.`)
-                    : error);
+                reject(error);
             };
             const onListening = () => {
                 this.httpServer?.off('error', onError);
@@ -233,8 +301,31 @@ export class Relay {
             };
             this.httpServer.once('error', onError);
             this.httpServer.once('listening', onListening);
-            this.httpServer.listen(this.port, host);
+            this.httpServer.listen(this.port, address);
         });
+
+        let host = this.bindLan ? '::' : '127.0.0.1';
+        try {
+            try {
+                await listen(host);
+            } catch (error) {
+                if (host !== '::' || error.code === 'EADDRINUSE') throw error;
+                host = '0.0.0.0';
+                await listen(host);
+            }
+        } catch (error) {
+            throw error.code === 'EADDRINUSE'
+                ? new Error(`Port ${this.port} is already in use. Pick a different port in the Multiplayer settings.`)
+                : error;
+        }
+        this.boundTo = host;
+
+        if (this.bindLan) {
+            this.lanAddress = localAddresses().find(address => isPrivateIPv4(address))
+                ?? await detectLanAddress({ gateway: this.routerAddress }).catch(() => null);
+        } else {
+            this.lanAddress = null;
+        }
 
         // Keep the process able to exit even with the relay running.
         this.httpServer.unref?.();
@@ -242,7 +333,7 @@ export class Relay {
         // Ask the router for a mapping only once the socket is actually
         // listening, so a hole is never opened for a port nothing is serving.
         if (options.autoMap !== false && this.bindLan) {
-            this.portMapping = await this.portMapper.open(this.port).catch(error => ({
+            this.portMapping = await this.portMapper.open(this.port, { gateway: this.routerAddress }).catch(error => ({
                 ok: false, reason: error?.message ?? 'port mapping failed',
             }));
             if (this.portMapping.ok) {
@@ -289,6 +380,8 @@ export class Relay {
         this.hostReport = null;
         this.oocHistory = [];
         this.personas.clear();
+        this.tickets.clear();
+        this.locked = false;
 
         // `close()` only fires once every connection is gone, and WebSocket
         // connections are long-lived. Terminating the sockets first means the
@@ -344,6 +437,8 @@ export class Relay {
         this.peers.clear();
         this.host = null;
         this.hostReport = null;
+        // Tickets were issued under the old code; a new code means a new guest list.
+        this.tickets.clear();
 
         this.#regenerateSecrets();
         this.log('info', 'Connection code rotated');
@@ -361,15 +456,22 @@ export class Relay {
     /** Everything the host's browser needs in order to build a connection code. */
     describe() {
         const addresses = localAddresses();
+        if (this.lanAddress && !addresses.includes(this.lanAddress)) addresses.unshift(this.lanAddress);
+        const ipv6 = this.bindLan && this.boundTo === '::' ? globalIPv6Addresses() : [];
         return {
             roomId: this.roomId.toString('hex'),
             psk: this.psk.toString('base64'),
             hostToken: this.hostToken.toString('base64'),
             port: this.port,
-            advertiseHost: this.bindLan ? (addresses[0] ?? '127.0.0.1') : '127.0.0.1',
+            advertiseHost: this.bindLan ? (this.lanAddress ?? addresses[0] ?? '127.0.0.1') : '127.0.0.1',
             addresses: this.bindLan
                 ? addresses.map(address => `${address}:${this.port}`)
                 : [`127.0.0.1:${this.port} (loopback only)`],
+            /** For a manual port forward: where the router should send the port. */
+            lanAddress: this.bindLan ? (this.lanAddress ?? addresses[0] ?? null) : null,
+            /** Global IPv6 addresses this relay can be reached on directly, firewall permitting. */
+            ipv6Addresses: ipv6,
+            locked: this.locked,
             portMapping: this.portMapping,
             /**
              * The address most likely to work for everyone. A router-confirmed
@@ -393,7 +495,10 @@ export class Relay {
             roomName: this.roomName,
             bindLan: this.bindLan,
             /** What the socket is actually bound to, as opposed to what is advertised. */
-            boundTo: this.bindLan ? '0.0.0.0' : '127.0.0.1',
+            boundTo: this.boundTo ?? (this.bindLan ? '0.0.0.0' : '127.0.0.1'),
+            lanAddress: this.bindLan ? this.lanAddress : null,
+            locked: this.locked,
+            breakerActive: this.breakerUntil > Date.now(),
             portMapping: this.portMapping,
             /**
              * The address most likely to work for everyone. A router-confirmed
@@ -434,6 +539,29 @@ export class Relay {
 
     unban(ip) {
         return this.bans.delete(String(ip));
+    }
+
+    /**
+     * Locks or unlocks the room. Locked, nobody new can join even with the code;
+     * players who were already admitted can still reconnect.
+     */
+    setLocked(locked) {
+        this.locked = Boolean(locked);
+        this.log('info', this.locked ? 'Room locked: only existing players may reconnect' : 'Room unlocked');
+        return this.locked;
+    }
+
+    /**
+     * Asks the router for the mapping again, e.g. after it was released for
+     * being idle. Keeps the same port, so existing connection codes stay valid.
+     */
+    async reopenMapping() {
+        if (!this.running || !this.bindLan) throw new Error('The relay is not listening beyond this machine.');
+        this.portMapping = await this.portMapper.open(this.port, { gateway: this.routerAddress }).catch(error => ({
+            ok: false, reason: error?.message ?? 'port mapping failed',
+        }));
+        this.emptySince = Date.now();
+        return this.portMapping;
     }
 
     // =======================================================================
@@ -591,6 +719,16 @@ export class Relay {
             return;
         }
 
+        // The peer knows the code, so this is not a failed guess: no penalty.
+        if (this.locked && !state.wantsHost) {
+            const ticket = typeof message.ticket === 'string' ? message.ticket : '';
+            if (!ticket || !this.tickets.has(ticket)) {
+                clearTimeout(timer);
+                this.#rejectSocket(socket, REJECT_REASON.ROOM_LOCKED);
+                return;
+            }
+        }
+
         clearTimeout(timer);
         this.pending.delete(socket);
         this.#clearFailures(state.ip);
@@ -628,6 +766,7 @@ export class Relay {
             hostName: this.host?.name ?? 'Host',
             requireParity: this.requireParity,
             peers: this.#roster(),
+            ticket: this.#issueTicket(message.ticket),
         });
 
         if (this.requireParity) {
@@ -652,7 +791,34 @@ export class Relay {
     // Abuse controls
     // =======================================================================
 
+    /**
+     * A rejoin ticket for a locked room. A reconnecting peer presents the one it
+     * was given and keeps it; anyone else gets a fresh one. Bounded so a stream
+     * of joins cannot grow the set without limit.
+     */
+    #issueTicket(previous) {
+        if (typeof previous === 'string' && this.tickets.has(previous)) return previous;
+        const ticket = randomBytes(18).toString('base64');
+        this.tickets.add(ticket);
+        while (this.tickets.size > LIMITS.MAX_TICKETS) {
+            this.tickets.delete(this.tickets.values().next().value);
+        }
+        return ticket;
+    }
+
     #noteFailure(ip) {
+        const now = Date.now();
+        this.recentFailures.push(now);
+        while (this.recentFailures.length && now - this.recentFailures[0] > LIMITS.GLOBAL_FAILURE_WINDOW_MS) {
+            this.recentFailures.shift();
+        }
+        if (this.recentFailures.length >= LIMITS.GLOBAL_FAILURE_LIMIT && this.breakerUntil <= now) {
+            this.breakerUntil = now + LIMITS.GLOBAL_BREAKER_MS;
+            this.recentFailures = [];
+            this.log('warn', `Many failed join attempts from different addresses; refusing new connections for `
+                + `${Math.round(LIMITS.GLOBAL_BREAKER_MS / 1000)}s. Consider "New code" if this keeps happening.`);
+        }
+
         const record = this.offenders.get(ip) ?? { failures: 0, blockedUntil: 0 };
         record.failures += 1;
         if (record.failures >= LIMITS.MAX_HANDSHAKE_FAILURES) {
@@ -1042,6 +1208,32 @@ export class Relay {
         for (const [ip, record] of this.offenders) {
             if (record.blockedUntil && record.blockedUntil < now) this.offenders.delete(ip);
         }
+
+        this.#releaseIdleMapping(now);
+    }
+
+    /**
+     * Closes the router port after the room has had no players besides the host
+     * for a while, so a forgotten session does not leave a hole open for hours.
+     * Reopened with {@link reopenMapping}.
+     */
+    #releaseIdleMapping(now) {
+        let players = 0;
+        for (const peer of this.peers.values()) if (peer.role !== ROLE.HOST) players += 1;
+        if (players > 0) {
+            this.emptySince = 0;
+            return;
+        }
+        if (!this.emptySince) this.emptySince = now;
+        if (!this.portMapping?.ok || now - this.emptySince < LIMITS.IDLE_UNMAP_MS) return;
+
+        this.log('info', `No players for ${Math.round(LIMITS.IDLE_UNMAP_MS / 60000)} minutes; closing the router port`);
+        void this.portMapper.close().catch(() => {});
+        this.portMapping = {
+            ok: false,
+            idleClosed: true,
+            reason: 'The router port was closed because nobody joined for a while. Press "Reopen port" to open it again.',
+        };
     }
 }
 

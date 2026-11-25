@@ -8,7 +8,7 @@
  * =====================================================================
  */
 
-export const PROTOCOL_REVISION = 'STMP/1.4.0';
+export const PROTOCOL_REVISION = 'STMP/1.5.0';
 
 export const FRAME_VERSION = 0x01;
 export const HEADER_SIZE = 10;
@@ -54,6 +54,8 @@ export const REJECT_REASON = Object.freeze({
     MALFORMED: 'malformed',
     PARITY_MISMATCH: 'parity_mismatch',
     SERVER_CLOSING: 'server_closing',
+    /** The host locked the room; only players already admitted may reconnect. */
+    ROOM_LOCKED: 'room_locked',
 });
 
 export const OP = Object.freeze({
@@ -161,6 +163,18 @@ export const LIMITS = Object.freeze({
     MAX_HANDSHAKE_FAILURES: 5,
     HANDSHAKE_BLOCK_MS: 60000,
     COUNTER_WINDOW: 64,
+    /**
+     * Room-wide breaker for failed handshakes. Per-IP blocking does nothing
+     * against guesses spread across many addresses, which is the realistic
+     * threat once the port is reachable from the internet.
+     */
+    GLOBAL_FAILURE_LIMIT: 30,
+    GLOBAL_FAILURE_WINDOW_MS: 60000,
+    GLOBAL_BREAKER_MS: 120000,
+    /** Rejoin tickets kept for a locked room. */
+    MAX_TICKETS: 64,
+    /** Release the router port after this long with nobody but the host. */
+    IDLE_UNMAP_MS: 30 * 60 * 1000,
 });
 
 export const DEFAULT_PORT = 8899;

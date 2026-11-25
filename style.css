@@ -1026,3 +1026,20 @@
 @media (prefers-reduced-motion: reduce) {
     #stmp_generation_bar { transition: none; }
 }
+
+/* Internet play box (host panel) */
+.stmp-internet {
+    margin: 6px 0;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+}
+.stmp-internet ol {
+    margin: 4px 0 4px 18px;
+    padding: 0;
+}
+.stmp-internet .stmp-inline-button {
+    display: inline-flex;
+    padding: 2px 8px;
+    margin: 2px 0 0 4px;
+    font-size: 0.9em;
+}

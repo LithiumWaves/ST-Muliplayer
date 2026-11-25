@@ -57,10 +57,43 @@ const DESCRIPTION = 'SillyTavern Multiplayer';
 // Shared helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Gateways that consumer routers ship with. Used only when this machine cannot
+ * list its own interfaces, which is the normal state of affairs on Android:
+ * since Android 11 the netlink call behind `os.networkInterfaces()` is denied to
+ * apps such as Termux, so there is nothing to derive a gateway from.
+ */
+export const COMMON_GATEWAYS = Object.freeze([
+    '192.168.1.1', '192.168.0.1', '10.0.0.1', '192.168.1.254',
+    '192.168.86.1', '192.168.68.1', '192.168.50.1', '10.0.0.138',
+]);
+
+/** A dotted-quad IPv4 in a private range, or null. Used to vet a typed router address. */
+export function normaliseGateway(value) {
+    const text = String(value ?? '').trim();
+    if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(text)) return null;
+    if (text.split('.').some(octet => Number(octet) > 255)) return null;
+    // Only ever talk to a router on the local network, never a public host.
+    return isPrivateIPv4(text) && !text.startsWith('127.') && !text.startsWith('0.') ? text : null;
+}
+
+/**
+ * `os.networkInterfaces()`, but never throwing. Android denies the underlying
+ * call to Termux and it surfaces as an EACCES exception, which used to take
+ * hosting down with it.
+ */
+export function safeNetworkInterfaces(osModule = os) {
+    try {
+        return osModule.networkInterfaces() ?? {};
+    } catch {
+        return {};
+    }
+}
+
 /** Local IPv4 interfaces, with the subnet mask, so we can guess gateways. */
-function localInterfaces() {
+function localInterfaces(osModule = os) {
     const found = [];
-    for (const entries of Object.values(os.networkInterfaces())) {
+    for (const entries of Object.values(safeNetworkInterfaces(osModule))) {
         for (const entry of entries ?? []) {
             if (entry.family === 'IPv4' && !entry.internal) {
                 found.push({ address: entry.address, netmask: entry.netmask });
@@ -77,9 +110,11 @@ function localInterfaces() {
  * `route print` is platform-specific and brittle. The network address plus one,
  * and the broadcast address minus one, covers essentially every home router.
  */
-function candidateGateways() {
+function candidateGateways(preferred = null, interfaces = localInterfaces()) {
     const candidates = new Set();
-    for (const { address, netmask } of localInterfaces()) {
+    const typed = normaliseGateway(preferred);
+    if (typed) candidates.add(typed);
+    for (const { address, netmask } of interfaces) {
         const ip = address.split('.').map(Number);
         const mask = String(netmask ?? '255.255.255.0').split('.').map(Number);
         if (ip.length !== 4 || mask.length !== 4) continue;
@@ -89,6 +124,11 @@ function candidateGateways() {
 
         candidates.add([...network.slice(0, 3), network[3] + 1].join('.'));
         candidates.add([...broadcast.slice(0, 3), broadcast[3] - 1].join('.'));
+    }
+    // Nothing to derive from (Android), and nothing typed: fall back to the
+    // addresses routers ship with. A wrong guess only costs one UDP packet.
+    if (interfaces.length === 0 && !typed) {
+        for (const gateway of COMMON_GATEWAYS) candidates.add(gateway);
     }
     return [...candidates];
 }
@@ -113,6 +153,64 @@ function localAddressFacing(gateway) {
         if (address.split('.').slice(0, 3).join('.') === target) return address;
     }
     return localInterfaces()[0]?.address ?? null;
+}
+
+/**
+ * The local address the kernel would use to reach `gateway`, found without
+ * listing interfaces: "connecting" a UDP socket only picks a route, it sends
+ * nothing, and the socket's own address is then the answer. This is what makes
+ * UPnP usable on Android, where the interface list is unavailable.
+ */
+export function routeLocalAddress(gateway, timeoutMs = 500) {
+    return new Promise(resolve => {
+        let socket;
+        let done = false;
+        const finish = value => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            try { socket?.close(); } catch { /* already closed */ }
+            resolve(value);
+        };
+        const timer = setTimeout(() => finish(null), timeoutMs);
+        try {
+            socket = dgram.createSocket('udp4');
+            socket.on('error', () => finish(null));
+            socket.connect(NATPMP_PORT, gateway, () => {
+                try {
+                    const { address } = socket.address();
+                    finish(address && address !== '0.0.0.0' ? address : null);
+                } catch {
+                    finish(null);
+                }
+            });
+        } catch {
+            finish(null);
+        }
+    });
+}
+
+/** Interface list first, routing trick second. */
+async function internalClientFor(gateway) {
+    const target = String(gateway ?? '').split('.').slice(0, 3).join('.');
+    for (const { address } of localInterfaces()) {
+        if (address.split('.').slice(0, 3).join('.') === target) return address;
+    }
+    return (await routeLocalAddress(gateway)) ?? localInterfaces()[0]?.address ?? null;
+}
+
+/**
+ * This machine's LAN address, for showing the host what to forward a port to.
+ * Works on Android too, via {@link routeLocalAddress}.
+ */
+export async function detectLanAddress({ gateway = null } = {}) {
+    const listed = localInterfaces().find(({ address }) => isPrivateIPv4(address));
+    if (listed) return listed.address;
+    for (const candidate of candidateGateways(gateway, [])) {
+        const address = await routeLocalAddress(candidate);
+        if (address && isPrivateIPv4(address)) return address;
+    }
+    return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -182,8 +280,8 @@ async function natpmpMap(gateway, port, lifetimeSeconds) {
  * blocked for seconds before the connection code appeared. Concurrently the
  * whole attempt costs one timeout regardless of how many candidates there are.
  */
-async function tryNatpmp(port, log) {
-    const attempts = candidateGateways().map(async gateway => {
+async function tryNatpmp(port, log, preferred = null) {
+    const attempts = candidateGateways(preferred).map(async gateway => {
         const externalIp = await natpmpExternalAddress(gateway);
         const mapping = await natpmpMap(gateway, port, LEASE_SECONDS);
         log('info', `${LOG} NAT-PMP mapped ${mapping.externalPort} via ${gateway}`);
@@ -358,8 +456,48 @@ async function soapCall(service, action, args) {
     return response.body;
 }
 
-async function tryUpnp(port, log) {
-    const locations = await ssdpDiscover();
+/**
+ * Where routers commonly serve their UPnP device description. Used when SSDP
+ * multicast finds nothing, which is usual on Android: Wi-Fi drivers drop
+ * multicast for apps that do not hold a MulticastLock, and Termux cannot take one.
+ */
+const IGD_PORTS = [1900, 5000, 49152, 2869, 52869];
+const IGD_PATHS = ['/rootDesc.xml', '/igd.xml', '/gatedesc.xml', '/description.xml', '/DeviceDescription.xml'];
+
+function directIgdLocations(gateways) {
+    const locations = [];
+    for (const gateway of gateways.slice(0, 3)) {
+        for (const port of IGD_PORTS) {
+            for (const path of IGD_PATHS) locations.push(`http://${gateway}:${port}${path}`);
+        }
+    }
+    return locations;
+}
+
+/** Probes the likely description URLs concurrently; returns those that answered. */
+async function probeIgdLocations(gateways) {
+    const results = await Promise.all(directIgdLocations(gateways).map(async location => {
+        try {
+            const description = await fetchXml(location, { timeoutMs: 900 });
+            return description.status === 200 && findWanService(description.body, location) ? location : null;
+        } catch {
+            return null;
+        }
+    }));
+    return results.filter(Boolean);
+}
+
+/** SSDP first; if multicast is filtered, ask likely gateways directly. */
+async function discoverIgd(preferred = null, ssdpTimeoutMs = 1200) {
+    const found = await ssdpDiscover(ssdpTimeoutMs).catch(() => []);
+    if (found.length) return found;
+    const typed = normaliseGateway(preferred);
+    const gateways = typed ? [typed] : candidateGateways(null).slice(0, 3);
+    return probeIgdLocations(gateways);
+}
+
+async function tryUpnp(port, log, preferred = null) {
+    const locations = await discoverIgd(preferred);
     if (locations.length === 0) return null;
 
     for (const location of locations) {
@@ -368,7 +506,7 @@ async function tryUpnp(port, log) {
             const service = findWanService(description.body, location);
             if (!service) continue;
 
-            const internalClient = localAddressFacing(new URL(location).hostname);
+            const internalClient = await internalClientFor(new URL(location).hostname);
             if (!internalClient) continue;
 
             await soapCall(service, 'AddPortMapping', {
@@ -391,7 +529,9 @@ async function tryUpnp(port, log) {
             }
 
             log('info', `${LOG} UPnP mapped port ${port} via ${new URL(location).hostname}`);
-            return { method: 'UPnP', gateway: new URL(location).hostname, externalIp, externalPort: port, service };
+            return {
+                method: 'UPnP', gateway: new URL(location).hostname, externalIp, externalPort: port, service, internalClient,
+            };
         } catch (error) {
             log('info', `${LOG} ${location}: ${error.message}`);
         }
@@ -426,6 +566,7 @@ export class PortMapper {
         this.port = 0;
         this._renewTimer = null;
         this._service = null;
+        this._internalClient = null;
     }
 
     /**
@@ -433,7 +574,7 @@ export class PortMapper {
      * @returns {Promise<{ok: boolean, method?: string, externalIp?: string|null,
      *   externalPort?: number, reason?: string, cgnat?: boolean}>}
      */
-    async open(port) {
+    async open(port, { gateway = null } = {}) {
         this.port = port;
         await this.close();
 
@@ -444,8 +585,8 @@ export class PortMapper {
         // a router accepts a connection and then stalls.
         const attempt = (async () => {
             const [natpmp, upnp] = await Promise.all([
-                tryNatpmp(port, this.log).catch(() => null),
-                tryUpnp(port, this.log).catch(() => null),
+                tryNatpmp(port, this.log, gateway).catch(() => null),
+                tryUpnp(port, this.log, gateway).catch(() => null),
             ]);
             return natpmp ?? upnp;
         })();
@@ -459,11 +600,13 @@ export class PortMapper {
             return {
                 ok: false,
                 reason: 'The router did not respond to NAT-PMP or UPnP. It may have automatic port '
-                    + 'mapping disabled, or there may be a second router between this machine and the internet.',
+                    + 'mapping disabled, or there may be a second router between this machine and the internet. '
+                    + 'On Android, try typing your router\'s address in "Router address", or forward the port by hand.',
             };
         }
 
         this._service = result.service ?? null;
+        this._internalClient = result.internalClient ?? null;
         this.mapping = {
             method: result.method,
             gateway: result.gateway,
@@ -483,8 +626,9 @@ export class PortMapper {
                 externalIp: result.externalIp,
                 externalPort: result.externalPort,
                 reason: `The router reports its public address as ${result.externalIp}, which is itself a private `
-                    + 'address — your ISP is using carrier-grade NAT. Port mapping cannot get through that. '
-                    + 'A mesh VPN such as Tailscale, or a tunnel such as Cloudflare Tunnel, will work.',
+                    + 'address — your ISP is using carrier-grade NAT, and no port forward can get through that. '
+                    + 'Mobile data is almost always like this, so host from home Wi-Fi/broadband. If home internet '
+                    + 'is CGNAT too, ask the ISP for a public IPv4 address, or try the IPv6 address shown in the panel.',
             };
         }
 
@@ -511,7 +655,7 @@ export class PortMapper {
                         NewExternalPort: this.mapping.externalPort,
                         NewProtocol: 'TCP',
                         NewInternalPort: this.port,
-                        NewInternalClient: localAddressFacing(this.mapping.gateway),
+                        NewInternalClient: this._internalClient ?? localAddressFacing(this.mapping.gateway),
                         NewEnabled: 1,
                         NewPortMappingDescription: DESCRIPTION,
                         NewLeaseDuration: LEASE_SECONDS,
@@ -559,9 +703,9 @@ export class PortMapper {
  *
  * @returns {Promise<{ok: boolean, address?: string, method?: string, cgnat?: boolean, reason?: string}>}
  */
-export async function queryExternalAddress({ log = () => {} } = {}) {
+export async function queryExternalAddress({ log = () => {}, gateway = null } = {}) {
     // NAT-PMP first: one UDP packet, no mapping side effects.
-    const natpmpAttempts = candidateGateways().map(async gateway => ({
+    const natpmpAttempts = candidateGateways(gateway).map(async gateway => ({
         address: await natpmpExternalAddress(gateway),
         method: 'NAT-PMP',
     }));
@@ -572,7 +716,7 @@ export async function queryExternalAddress({ log = () => {} } = {}) {
 
     if (!found) {
         // UPnP GetExternalIPAddress is read-only too.
-        const locations = await ssdpDiscover(1500).catch(() => []);
+        const locations = await discoverIgd(gateway, 1500).catch(() => []);
         for (const location of locations) {
             try {
                 const description = await fetchXml(location);
@@ -610,6 +754,7 @@ export async function queryExternalAddress({ log = () => {} } = {}) {
 
 export const __testing = {
     candidateGateways,
+    directIgdLocations,
     findWanService,
     soapEnvelope,
     escapeXml,

@@ -39,6 +39,12 @@
                     <input id="stmp_advertise_port" class="text_pole" type="number" min="0" max="65535" step="1"
                            placeholder="0 = same as the port above">
 
+                    <label for="stmp_router_address" title="Only needed if automatic port mapping cannot find your router (common on Android)">
+                        Router address
+                    </label>
+                    <input id="stmp_router_address" class="text_pole" type="text" autocomplete="off"
+                           placeholder="optional, e.g. 192.168.1.1">
+
                     <label for="stmp_max_peers">Max players</label>
                     <input id="stmp_max_peers" class="text_pole" type="number" min="2" max="8" step="1">
 
@@ -74,16 +80,18 @@
                 </label>
 
                 <div class="stmp-muted stmp-note">
-                    <b>Playing with someone on another network? Leave all three fields alone.</b>
-                    With automatic port mapping ticked above, the router supplies your public address and it
-                    goes into the code for you. Start hosting and check the activity log — it will say whether
-                    the router opened the port.
+                    <b>Playing over the internet, no VPN needed.</b> Host from home Wi-Fi or broadband, not
+                    mobile data (carriers block incoming connections). With automatic port mapping ticked, the
+                    router opens the port and supplies your public address. Start hosting and look at
+                    <i>Internet play</i> below the code: it says whether that worked.
                     <br><br>
-                    <b>Only fill these in if that fails.</b> Then put one of the following here:
-                    a <b>Tailscale</b> address (<code>100.x.y.z</code>, install it on both machines — works even
-                    behind carrier-grade NAT); your <b>public IP</b> if you forward the port on your router
-                    yourself; or a <b>tunnel hostname</b> from Cloudflare Tunnel or ngrok, in which case also
-                    tick the HTTPS box and leave the public port at 0.
+                    <b>On a phone (Termux)</b> the router often cannot be found automatically. Type its address
+                    in <i>Router address</i> (usually <code>192.168.1.1</code> or <code>192.168.0.1</code>).
+                    <br><br>
+                    <b>If the router will not open the port</b>, forward it yourself in the router's settings
+                    (TCP, the port above, to the address shown under <i>Internet play</i>), then put your
+                    public IP or your router's DDNS hostname in <i>Address players connect to</i>.
+                    A Tailscale address or a tunnel hostname still works there too, if you ever want one.
                 </div>
 
                 <label class="checkbox_label" for="stmp_require_parity">
@@ -105,6 +113,13 @@
                         <div id="stmp_copy_code" class="menu_button" title="Copy"><i class="fa-solid fa-copy"></i></div>
                     </div>
                     <div class="stmp-muted">Reachable at: <span id="stmp_addresses"></span></div>
+                    <div id="stmp_internet" class="stmp-internet stmp-note"></div>
+                    <div class="stmp-buttons">
+                        <div id="stmp_lock" class="menu_button" title="Stop anyone new from joining, even with the code. Players already in can still reconnect.">
+                            <i class="fa-solid fa-lock-open"></i> <span>Lock room</span></div>
+                        <div id="stmp_reopen_port" class="menu_button" hidden title="Ask the router to open the port again">
+                            <i class="fa-solid fa-door-open"></i> Reopen port</div>
+                    </div>
                     <div class="stmp-buttons">
                         <div id="stmp_rotate" class="menu_button" title="Invalidate the current code"><i class="fa-solid fa-rotate"></i> New code</div>
                         <div id="stmp_host_stop" class="menu_button redWarningBG"><i class="fa-solid fa-stop"></i> Stop hosting</div>

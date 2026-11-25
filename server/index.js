@@ -117,6 +117,7 @@ export async function init(router) {
                     maxPeers: body.maxPeers,
                     requireParity: body.requireParity,
                     parityStrictness: body.parityStrictness,
+                    routerAddress: typeof body.routerAddress === 'string' ? body.routerAddress.slice(0, 64) : null,
                 });
             });
 
@@ -146,6 +147,29 @@ export async function init(router) {
         response.json({ ...relay.status(), revision: PROTOCOL_REVISION, addresses: localAddresses() });
     });
 
+    // ----------------------------------------------------------------- lock --
+    // Locked, the room refuses newcomers even with the code. Players already
+    // admitted can still reconnect, so a sleeping phone is not locked out.
+    router.post('/lock', (request, response) => {
+        if (!requireAdmin(request, response)) return;
+        if (!relay.running) return response.status(409).send('The relay is not running.');
+        response.json({ locked: relay.setLocked(request.body?.locked !== false) });
+    });
+
+    // ---------------------------------------------------------------- remap --
+    // Re-requests the router port, e.g. after it was closed for being idle.
+    router.post('/remap', async (request, response) => {
+        if (!requireAdmin(request, response)) return;
+        if (!relay.running) return response.status(409).send('The relay is not running.');
+        try {
+            const portMapping = await exclusive(() => relay.reopenMapping());
+            noStore(response);
+            response.json({ portMapping });
+        } catch (error) {
+            fail(response, error, 409);
+        }
+    });
+
     // ----------------------------------------------------- external-address --
     // Asks the router what its public address is, so the host does not have to
     // go and look it up somewhere. Read-only: no mapping is created.
@@ -153,7 +177,8 @@ export async function init(router) {
         if (!requireAdmin(request, response)) return;
         try {
             noStore(response);
-            response.json(await queryExternalAddress({ log }));
+            const gateway = typeof request.query?.router === 'string' ? request.query.router.slice(0, 64) : null;
+            response.json(await queryExternalAddress({ log, gateway }));
         } catch (error) {
             fail(response, error);
         }

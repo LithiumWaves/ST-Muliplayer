@@ -57,6 +57,12 @@ const DEFAULT_SETTINGS = Object.freeze({
      * turn it off if you would rather manage router rules yourself.
      */
     autoPortForward: true,
+    /**
+     * The router's LAN address, e.g. 192.168.1.1. Optional. Android does not let
+     * Termux discover it, so typing it here is what makes automatic port mapping
+     * work when hosting from a phone.
+     */
+    routerAddress: '',
     /** Public port players reach, if it differs from the listen port. 0 = same. */
     advertisePort: 0,
     /** True when the address above is fronted by an HTTPS tunnel or proxy (wss). */
