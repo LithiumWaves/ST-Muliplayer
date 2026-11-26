@@ -27,6 +27,7 @@ the relay, and are never written to the chat.
 ```js
 const mp = globalThis.STMultiplayer;      // undefined when Multiplayer is not loaded
 mp.isConnected();                         // in a room right now?
+mp.inSession();                           // ...and in the room's shared chat (not a local one)?
 mp.role();                                // 'host' | 'client' | null
 mp.selfId(); mp.hostId();                 // peer ids (change on reconnect)
 mp.peers();                               // [{ id, name, role, isMe, persona: { name, description, ownerId } | null }]
