@@ -3,10 +3,41 @@
 One host, one shared roleplay, and a separate persona for each player. The host
 runs the model; joining players do not need their own inference API keys.
 
-**Version 1.5.0: internet play without a VPN, phone hosting, and group chats.**
+**Version 1.6.0: an extension API (Phone Trigger multiplayer). 1.5.0: internet play without a VPN, phone hosting, and group chats.**
 Both the browser extension and the host relay must be updated together. The wire
-revision is `STMP/1.5.0`; older peers are deliberately rejected rather than mixed
+revision is `STMP/1.6.0`; older peers are deliberately rejected rather than mixed
 into the same room.
+
+## What changed in 1.6.0
+
+- **Extension API.** Other extensions can now talk to the room through
+  `globalThis.STMultiplayer`: see who is playing and exchange their own messages
+  with one player, the host, or everyone. Phone Trigger uses it for mail and calls
+  between players and for shared D-Mails and time leaps. See
+  [Extension API](#extension-api).
+- New opcode `ext.message`; the wire revision is now `STMP/1.6.0`. Update the
+  extension and the relay together, on every machine.
+
+## Extension API
+
+Installed when Multiplayer activates, removed when it is disabled. Messages
+travel over the room's encrypted channel, are stamped with the real sender by
+the relay, and are never written to the chat.
+
+```js
+const mp = globalThis.STMultiplayer;      // undefined when Multiplayer is not loaded
+mp.isConnected();                         // in a room right now?
+mp.role();                                // 'host' | 'client' | null
+mp.selfId(); mp.hostId();                 // peer ids (change on reconnect)
+mp.peers();                               // [{ id, name, role, isMe, persona: { name, description, ownerId } | null }]
+mp.send('myext.ping', { any: 'json' }, { to: peerId });  // or to: 'host', or omit for everyone else
+const off = mp.on('myext.ping', ({ channel, data, from, name, role }) => { /* ... */ });
+const offRoster = mp.onRoster(peers => { /* connection, players or personas changed */ });
+```
+
+`document` also receives `stmp:ready` (the API was installed) and `stmp:roster`
+(`detail.peers`). Channel names should be namespaced and at most 64 characters;
+a message may be up to 512 KiB on the wire.
 
 ## What changed in 1.5.0
 

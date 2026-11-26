@@ -20,6 +20,7 @@ import os from 'node:os';
 import {
     CLIENT_ALLOWED_OPS,
     ECHO_TO_SENDER,
+    EXT,
     OOC,
     STAMP_IDENTITY, HS, LIMITS, OP, PROTOCOL_REVISION, REJECT_REASON, ROLE,
     PSK_LENGTH, HANDSHAKE_NONCE_LENGTH, ROOM_ID_LENGTH, TO_HOST_ONLY,
@@ -899,6 +900,8 @@ export class Relay {
 
         if (op === OP.PERSONA_STATE) return this.#onPersona(peer, payload);
 
+        if (op === OP.EXT_MESSAGE) return this.#onExt(peer, payload, size);
+
         // Typing notices are ephemeral and peer-to-peer: relayed to everyone else
         // with the author stamped, never stored and never echoed to the sender.
         if (op === OP.CHAT_TYPING) {
@@ -952,6 +955,40 @@ export class Relay {
         };
         this.personas.set(peer.id, stamped);
         return this.#broadcast(stamped, {});
+    }
+
+    /**
+     * Relays one extension message. Any admitted peer may send one, to a single
+     * peer, to the host, or to everyone else; the relay stamps the author so a
+     * message can never claim to be from somebody else. A departed recipient
+     * drops the message rather than turning it into a broadcast.
+     */
+    async #onExt(peer, payload, size) {
+        const channel = payload?.channel;
+        if (typeof channel !== 'string' || !channel || channel.length > EXT.MAX_CHANNEL) return;
+        if (size > EXT.MAX_BYTES) {
+            this.log('warn', `Dropped an oversized extension message from ${peer.id} (${size} bytes)`);
+            return;
+        }
+        const outgoing = {
+            op: OP.EXT_MESSAGE,
+            channel,
+            data: payload.data ?? null,
+            from: peer.id,
+            name: peer.name,
+            role: peer.role,
+        };
+        const to = payload.to;
+        if (to === 'host') {
+            if (!this.host || this.host.id === peer.id) return;
+            return this.#send(this.host, outgoing);
+        }
+        if (typeof to === 'string' && to) {
+            const target = this.peers.get(to);
+            if (target?.admitted && target.id !== peer.id) return this.#send(target, outgoing);
+            return;
+        }
+        return this.#broadcast(outgoing, { except: peer.id });
     }
 
     // =======================================================================

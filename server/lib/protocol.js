@@ -8,7 +8,7 @@
  * =====================================================================
  */
 
-export const PROTOCOL_REVISION = 'STMP/1.5.0';
+export const PROTOCOL_REVISION = 'STMP/1.6.0';
 
 export const FRAME_VERSION = 0x01;
 export const HEADER_SIZE = 10;
@@ -129,6 +129,15 @@ export const OP = Object.freeze({
     GEN_END: 'gen.end',
     GEN_ABORT: 'gen.abort',
 
+    /**
+     * Any peer -> one peer, the host, or the room: a message for another
+     * extension (Phone Trigger mail, calls, D-Mails...). Opaque to the room:
+     * never written to the chat. Carries `channel` (a namespaced string such as
+     * "pt.mail") and `data`; the relay stamps the sender. `to` is a peer id,
+     * "host", or absent for everyone else in the room.
+     */
+    EXT_MESSAGE: 'ext.message',
+
     ERROR: 'error',
 });
 
@@ -204,6 +213,9 @@ export const CLIENT_ALLOWED_OPS = new Set([
     // nobody, and left that peer quietly out of step with the room.
     OP.CHAT_EDIT,
     OP.CHAT_DELETE,
+    // Extension messages are peer-to-peer (mail and calls between players);
+    // the relay stamps the sender, so nobody can speak as somebody else.
+    OP.EXT_MESSAGE,
 ]);
 
 /** Opcodes the relay forwards to the host only, rather than broadcasting. */
@@ -226,7 +238,13 @@ export const TO_HOST_ONLY = new Set([
 export const ECHO_TO_SENDER = new Set([OP.OOC_MESSAGE]);
 
 /** Opcodes the relay stamps with the sender's name as well as its id. */
-export const STAMP_IDENTITY = new Set([OP.OOC_MESSAGE, OP.PERSONA_STATE, OP.CHAT_TYPING]);
+export const STAMP_IDENTITY = new Set([OP.OOC_MESSAGE, OP.PERSONA_STATE, OP.CHAT_TYPING, OP.EXT_MESSAGE]);
+
+/** Caps for extension messages. Mirrors lib/protocol.js. */
+export const EXT = Object.freeze({
+    MAX_CHANNEL: 64,
+    MAX_BYTES: 512 * 1024,
+});
 
 /** Caps for the out-of-character channel. Mirrors lib/protocol.js. */
 export const OOC = Object.freeze({

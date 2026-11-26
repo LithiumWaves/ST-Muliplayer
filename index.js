@@ -24,6 +24,7 @@ import { DEFAULT_PORT, LIMITS, SETTINGS_KEY, parseExtensionFolder } from './lib/
 import { MultiplayerSession } from './lib/session.js';
 import { MultiplayerUI } from './lib/ui.js';
 import { sharingState } from './lib/identity.js';
+import { installExtensionApi } from './lib/extension-api.js';
 
 /**
  * Folder name as SillyTavern addresses it when resolving templates.
@@ -92,6 +93,8 @@ let ui = null;
 let started = false;
 let activation = 0;
 let commandsRegistered = false;
+/** @type {(() => void) | null} */
+let uninstallApi = null;
 const onUnload = () => { try { session?.socket?.close('page closed'); } catch {} };
 
 function settings() {
@@ -241,6 +244,9 @@ export async function init() {
 
     registerSlashCommands(deps);
 
+    // Other extensions talk to the room through globalThis.STMultiplayer.
+    uninstallApi = installExtensionApi(session);
+
     // Leaving a session cleanly on unload stops the relay from holding a dead
     // peer slot until its heartbeat expires.
     globalThis.addEventListener('beforeunload', onUnload);
@@ -269,6 +275,8 @@ async function teardown() {
     started = false;
     globalThis.removeEventListener('beforeunload', onUnload);
     delete globalThis.stmpGenerateInterceptor;
+    try { uninstallApi?.(); } catch { /* ignore */ }
+    uninstallApi = null;
     oldUI?.destroy();
     try { oldSession?.ooc.destroy(); } catch { /* ignore */ }
     try { oldSession?.typing.destroy(); } catch { /* ignore */ }
